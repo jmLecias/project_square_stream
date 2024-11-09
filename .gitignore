@@ -1,0 +1,7 @@
+/venv
+
+/hls
+
+/*.mp4
+
+/ffmpeg-7.1-full_build
