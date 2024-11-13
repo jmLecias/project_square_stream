@@ -19,9 +19,8 @@ async def handle_signaling(websocket):
     pc = RTCPeerConnection()
 
     # Create RTSP stream track and add it to the peer connection
-    rtsp_url = "rtsp://CAPSTONE:@CAPSTONE2@192.168.1.89:554/live/ch00_0"
+    rtsp_url = "rtsp://CAPSTONE:@CAPSTONE2@192.168.254.105:554/live/ch00_0"
     video_track = RTSPVideoStreamTrack(rtsp_url)
-    print(f"Track direction: {video_track.direction}")
     pc.addTrack(video_track)
 
     pc.on("iceconnectionstatechange", lambda: print(f"ICE connection state: {pc.iceConnectionState}"))
@@ -80,7 +79,7 @@ async def handle_signaling(websocket):
 
 
 async def main():
-    start_server = websockets.serve(handle_signaling, "0.0.0.0", 8765)
+    start_server = websockets.serve(handle_signaling, "localhost", 8765)
     print("WebSocket server started at ws://localhost:8765")
 
     server = await start_server

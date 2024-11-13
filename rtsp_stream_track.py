@@ -8,7 +8,7 @@ class RTSPVideoStreamTrack(VideoStreamTrack):
     def __init__(self, rtsp_url):
         super().__init__()
         self.rtsp_url = rtsp_url
-        self.direction = "sendonly"  # You can use "sendrecv" if it's bidirectional, or "sendonly"
+        self.direction = "sendrecv"  # You can use "sendrecv" if it's bidirectional, or "sendonly"
 
         # Start the FFmpeg subprocess
         self.process = subprocess.Popen(
@@ -44,5 +44,5 @@ class RTSPVideoStreamTrack(VideoStreamTrack):
         video_frame.pts, video_frame.time_base = self._get_pts_time_base()
 
         # Simulate frame rate (30fps)
-        await asyncio.sleep(1 / 30)
+        await asyncio.sleep(1 / 20)
         return video_frame

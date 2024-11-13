@@ -7,6 +7,8 @@ import ssl
 import uuid
 
 import cv2
+import numpy as np
+import gc
 from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
@@ -19,52 +21,71 @@ pcs = set()
 relay = MediaRelay()
 
 
+net = cv2.dnn.readNetFromCaffe("MobileNetSSD_deploy.prototxt", "MobileNetSSD_deploy.caffemodel")
+labels = {15: "person"}  # Only detecting "person" for simplicity
+
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
 class VideoTransformTrack(MediaStreamTrack):
     """
-    A video stream track that transforms frames from an another track.
+    A video stream track that transforms frames from another track.
     """
 
     kind = "video"
 
-    def __init__(self, track, transform):
-        super().__init__()  # don't forget this!
+    def __init__(self, track, transform, conf_threshold=0.5):
+        super().__init__()
         self.track = track
         self.transform = transform
+        self.conf_threshold = conf_threshold
 
     async def recv(self):
-        frame = await self.track.recv()
+        orig_frame = await self.track.recv()
+        frame = orig_frame.to_ndarray(format="bgr24")
 
-        if self.transform == "cartoon":
-            img = frame.to_ndarray(format="bgr24")
+        gc.collect()
+        
+        # # Perform object detection
+        # blob = cv2.dnn.blobFromImage(frame, 0.007843, (300, 300), 127.5)
+        # net.setInput(blob)
+        # detections = net.forward()
+        
+        # # Draw bounding boxes and labels for detected persons
+        # for i in range(detections.shape[2]):
+        #     confidence = detections[0, 0, i, 2]
+        #     if confidence > self.conf_threshold:
+        #         idx = int(detections[0, 0, i, 1])
+        #         if idx in labels:
+        #             box = detections[0, 0, i, 3:7] * np.array(
+        #                 [frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]]
+        #             )
+        #             (x1, y1, x2, y2) = box.astype("int")
+        #             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        #             label = f"{labels[idx]}: {confidence:.2f}"
+        #             cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            # prepare color
-            img_color = cv2.pyrDown(cv2.pyrDown(img))
-            for _ in range(6):
-                img_color = cv2.bilateralFilter(img_color, 9, 9, 7)
-            img_color = cv2.pyrUp(cv2.pyrUp(img_color))
+        # # Convert modified frame back to VideoFrame format
+        # new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
+        # new_frame.pts = orig_frame.pts
+        # new_frame.time_base = orig_frame.time_base
+        
+        # return new_frame
+        
+        # gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale for Haar Cascade
+        # faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        
+        # # Draw bounding boxes for detected faces
+        # for (fx, fy, fw, fh) in faces:
+        #     cv2.rectangle(frame, (fx, fy), (fx + fw, fy + fh), (255, 0, 0), 2)
+        #     cv2.putText(frame, "Face", (fx, fy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-            # prepare edges
-            img_edges = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            img_edges = cv2.adaptiveThreshold(
-                cv2.medianBlur(img_edges, 7),
-                255,
-                cv2.ADAPTIVE_THRESH_MEAN_C,
-                cv2.THRESH_BINARY,
-                9,
-                2,
-            )
-            img_edges = cv2.cvtColor(img_edges, cv2.COLOR_GRAY2RGB)
+        # Convert modified frame back to VideoFrame format
+        new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
+        new_frame.pts = orig_frame.pts
+        new_frame.time_base = orig_frame.time_base
 
-            # combine color and edges
-            img = cv2.bitwise_and(img_color, img_edges)
-
-            # rebuild a VideoFrame, preserving timing information
-            new_frame = VideoFrame.from_ndarray(img, format="bgr24")
-            new_frame.pts = frame.pts
-            new_frame.time_base = frame.time_base
-            return new_frame
-        else:
-            return frame
+        return orig_frame
+            
 
 
 async def index(request):
@@ -91,7 +112,21 @@ async def offer(request):
     log_info("Created for %s", request.remote)
 
     # prepare local media
-    player = MediaPlayer(os.path.join(ROOT, "demo-instruct.wav"))
+    audio_player = MediaPlayer(os.path.join(ROOT, "demo-instruct.wav"))
+    
+    video_player = MediaPlayer(
+    "rtsp://CAPSTONE:@CAPSTONE2@192.168.254.105:554/live/ch00_0",
+    options={
+        "rtsp_transport": "tcp",               # Force TCP transport
+        "buffer_size": "65536",                # Set a higher buffer size
+        "max_delay": "500000",                 # Max delay for buffering in microseconds
+        "stimeout": "5000000",                 # Set a timeout for the stream
+        "fflags": "nobuffer",                  # Disable buffer (or use lower latency buffer)
+        "flags": "low_delay",                  # Low latency mode
+        "analyzeduration": "10000000",
+        "probesize": "10000000"
+    }
+)
     if args.record_to:
         recorder = MediaRecorder(args.record_to)
     else:
@@ -116,12 +151,12 @@ async def offer(request):
         log_info("Track %s received", track.kind)
 
         if track.kind == "audio":
-            pc.addTrack(player.audio)
+            pc.addTrack(audio_player.audio)
             recorder.addTrack(track)
         elif track.kind == "video":
             pc.addTrack(
                 VideoTransformTrack(
-                    relay.subscribe(track), transform=params["video_transform"]
+                    relay.subscribe(video_player.video), transform=params["video_transform"]
                 )
             )
             if args.record_to:
