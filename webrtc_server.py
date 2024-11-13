@@ -1,7 +1,7 @@
 import asyncio
 import json
 import websockets
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
 from aiortc.contrib.media import MediaPlayer
 from rtsp_stream_track import RTSPVideoStreamTrack
 
@@ -23,6 +23,8 @@ async def handle_signaling(websocket):
     video_track = RTSPVideoStreamTrack(rtsp_url)
     print(f"Track direction: {video_track.direction}")
     pc.addTrack(video_track)
+
+    pc.on("iceconnectionstatechange", lambda: print(f"ICE connection state: {pc.iceConnectionState}"))
 
     async for message in websocket:
         data = json.loads(message)
@@ -47,12 +49,30 @@ async def handle_signaling(websocket):
         # 2. Handle ICE candidate from the client
         elif data["type"] == "ice-candidate" and data["candidate"]:
             candidate = data["candidate"]
-            ice_candidate = {
-                "sdpMid": candidate["sdpMid"],
-                "sdpMLineIndex": candidate["sdpMLineIndex"],
-                "candidate": candidate["candidate"]
-            }
-            await pc.addIceCandidate(ice_candidate)
+            sdp_mid = candidate.get("sdpMid", "")
+            sdp_mline_index = candidate.get("sdpMLineIndex", 0)
+
+            # print(f"Candidate data: {candidate}") # Candidate data: {'candidate': 'candidate:673270360 1 udp 2122194687 192.168.137.1 53936 typ host generation 0 ufrag oV8u network-id 1 network-cost 10', 'sdpMid': '6', 'sdpMLineIndex': 0, 'usernameFragment': 'oV8u'}
+            
+            candidate_str = candidate.get('candidate', '')
+            candidate_parts = candidate_str.split()
+
+            # Ensure we have enough parts in the candidate string
+            if len(candidate_parts) >= 8:
+                ice_candidate = RTCIceCandidate(
+                    foundation=candidate_parts[0].split(":")[1],  # 'candidate:673270360' -> '673270360'
+                    component=int(candidate_parts[1]),
+                    protocol=candidate_parts[2],
+                    priority=int(candidate_parts[3]),
+                    ip=candidate_parts[4],
+                    port=int(candidate_parts[5]),
+                    type=candidate_parts[7],
+                    sdpMid=sdp_mid,
+                    sdpMLineIndex=sdp_mline_index
+                )
+                await pc.addIceCandidate(ice_candidate)
+            else:
+                print("Candidate string does not have enough parts:", candidate_str)
 
     await pc.close()
     connected_clients.remove(websocket)
@@ -60,7 +80,7 @@ async def handle_signaling(websocket):
 
 
 async def main():
-    start_server = websockets.serve(handle_signaling, "localhost", 8765)
+    start_server = websockets.serve(handle_signaling, "0.0.0.0", 8765)
     print("WebSocket server started at ws://localhost:8765")
 
     server = await start_server
