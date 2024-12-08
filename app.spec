@@ -25,7 +25,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='square_stream',
+    name='square_stream_v2',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

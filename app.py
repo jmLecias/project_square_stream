@@ -29,14 +29,18 @@ lock = threading.Lock()
 def capture_frames(camera_id, rtsp_url, location_id, group_id):
     face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.6)
     
-    cap = cv2.VideoCapture(rtsp_url)
+    if(rtsp_url == "0"):
+        cap = cv2.VideoCapture(0) 
+    else:
+        cap = cv2.VideoCapture(rtsp_url)
+        
     if not cap.isOpened():
         print(f"Error: Unable to open RTSP stream for {camera_id}")
         return
 
     previous_detection_count = 0
     last_sent_time = 0
-    debounce_interval = 5  # Seconds to wait before sending another request on changes
+    debounce_interval = 4  # Seconds to wait before sending another request
 
     while True:
         ret, frame = cap.read()
@@ -44,21 +48,21 @@ def capture_frames(camera_id, rtsp_url, location_id, group_id):
             print(f"Stream ended for {camera_id}")
             break
 
-        # Downscale the frame
         frame = cv2.resize(frame, (640, 480))
 
-        # Process the frame (face detection)
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = face_detection.process(frame_rgb)
 
-        # Count detections
         current_detection_count = len(results.detections) if results.detections else 0
 
-        # Check if detection count changed and is greater than 0
-        if current_detection_count > 0:
+        if not previous_detection_count == current_detection_count:
+            previous_detection_count = current_detection_count
             now = time.time()
-            if now - last_sent_time >= debounce_interval:
+            
+            if current_detection_count > 0 and (now - last_sent_time) >= debounce_interval:
                 last_sent_time = now
+
+                # Update the previous detection count
 
                 _, buffer = cv2.imencode('.jpg', frame)
 
@@ -82,7 +86,7 @@ def capture_frames(camera_id, rtsp_url, location_id, group_id):
                         'https://api.official-square.site/face/recognize-faces', 
                         files=files,  # 'files' holds the image file to send
                         data=data,    # 'data' holds the rest of the fields
-                        timeout=5
+                        timeout=20    # 20 secs for slow connection
                     )
 
                     if response.status_code == 200:
@@ -92,8 +96,6 @@ def capture_frames(camera_id, rtsp_url, location_id, group_id):
                 except Exception as e:
                     print(f"Error sending recognition request: {str(e)}")
 
-        # Update the previous detection count
-        previous_detection_count = current_detection_count
 
         # Draw detections
         if results.detections:
@@ -163,7 +165,10 @@ def stream_cameras():
                 started_threads.append(camera_id)
                 continue
             else:
-                cap = cv2.VideoCapture(rtsp_url)
+                if (rtsp_url == "0"):
+                    cap = cv2.VideoCapture(0)
+                else:
+                    cap = cv2.VideoCapture(rtsp_url)
                 if not cap.isOpened():
                     print(f"RTSP URL unavailable: {rtsp_url}")
                     continue  # Skip this camera if the RTSP URL is not accessible
@@ -183,6 +188,52 @@ def stream_cameras():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+    
+@app.route('/stream_camera', methods=['POST'])
+def stream_camera():
+    try:
+        camera = request.json
+
+        if not camera:
+            return jsonify({"error": "Camera object is required"}), 400
+
+        camera_id = camera.get('camera_id')
+        rtsp_url = camera.get('rtsp_url')
+        location_id = camera.get('location_id')
+        group_id = camera.get('group_id')
+
+        if not camera_id or not rtsp_url:
+            return jsonify({"error": "Missing required fields: 'camera_id' and 'rtsp_url'"}), 400
+
+        if camera_id in threads:
+            return jsonify({"message": f"Camera {camera_id} is already streaming", "camera_id": camera_id}), 200
+
+        # Test RTSP URL or webcam
+        if rtsp_url == "0":
+            cap = cv2.VideoCapture(0)
+        else:
+            cap = cv2.VideoCapture(rtsp_url)
+
+        if not cap.isOpened():
+            return jsonify({"error": f"RTSP URL unavailable: {rtsp_url}"}), 400
+
+        cap.release()
+
+        # Add the camera to the frames and start a new thread
+        with lock:
+            frames[camera_id] = None
+
+        thread = threading.Thread(target=capture_frames, args=(camera_id, rtsp_url, location_id, group_id))
+        thread.daemon = True
+        thread.start()
+        threads[camera_id] = thread
+
+        return jsonify({"message": f"Camera {camera_id} started successfully", "camera_id": camera_id}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 
 def create_image():
