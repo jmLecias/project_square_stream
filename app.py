@@ -23,17 +23,18 @@ mp_face_detection = mp.solutions.face_detection
 
 frames = {}
 threads = {}
+bandwidth_usage = {}
 lock = threading.Lock()
 
 
 def capture_frames(camera_id, rtsp_url, location_id, group_id):
     face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.6)
-    
-    if(rtsp_url == "0"):
-        cap = cv2.VideoCapture(0) 
+
+    if rtsp_url == "0":
+        cap = cv2.VideoCapture(0)
     else:
         cap = cv2.VideoCapture(rtsp_url)
-        
+
     if not cap.isOpened():
         print(f"Error: Unable to open RTSP stream for {camera_id}")
         return
@@ -42,6 +43,10 @@ def capture_frames(camera_id, rtsp_url, location_id, group_id):
     last_sent_time = 0
     debounce_interval = 4  # Seconds to wait before sending another request
 
+    frame_count = 0
+    bandwidth_sum = 0
+    start_time = time.time()
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -49,44 +54,40 @@ def capture_frames(camera_id, rtsp_url, location_id, group_id):
             break
 
         frame = cv2.resize(frame, (640, 480))
-
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = face_detection.process(frame_rgb)
 
         current_detection_count = len(results.detections) if results.detections else 0
 
-        if not previous_detection_count == current_detection_count:
+        if current_detection_count != previous_detection_count:
             previous_detection_count = current_detection_count
             now = time.time()
-            
+
             if current_detection_count > 0 and (now - last_sent_time) >= debounce_interval:
                 last_sent_time = now
 
-                # Update the previous detection count
-
                 _, buffer = cv2.imencode('.jpg', frame)
+                bandwidth_sum += len(buffer)  # Size of the frame in bytes
+                frame_count += 1
 
                 # Prepare datetime in ISO format
                 datetime_now = datetime.now(timezone.utc).isoformat()
 
-                # Prepare the data in FormData format (mimicking FormData in JS)
                 files = {
                     'capturedFrames': (f"{datetime_now}_location_{location_id}.png", BytesIO(buffer), 'image/png')
                 }
-
                 data = {
                     'datetime': datetime_now,
                     'location_id': location_id,
                     'group_id': group_id,
                 }
 
-                # Send the request to the backend
                 try:
                     response = requests.post(
-                        'https://api.official-square.site/face/recognize-faces', 
-                        files=files,  # 'files' holds the image file to send
-                        data=data,    # 'data' holds the rest of the fields
-                        timeout=20    # 20 secs for slow connection
+                        'https://api.official-square.site/face/recognize-faces',
+                        files=files,
+                        data=data,
+                        timeout=20
                     )
 
                     if response.status_code == 200:
@@ -96,6 +97,13 @@ def capture_frames(camera_id, rtsp_url, location_id, group_id):
                 except Exception as e:
                     print(f"Error sending recognition request: {str(e)}")
 
+        # Bandwidth calculation: Update every second
+        elapsed_time = time.time() - start_time
+        if elapsed_time >= 1.0: 
+            with lock:
+                bandwidth_usage[camera_id] = ((bandwidth_sum * 8) / elapsed_time)  # Convert bytes to bits per second
+            bandwidth_sum = 0
+            start_time = time.time()
 
         # Draw detections
         if results.detections:
@@ -109,8 +117,8 @@ def capture_frames(camera_id, rtsp_url, location_id, group_id):
                     int(bboxC.height * h),
                 )
                 cv2.rectangle(frame, (bbox[0], bbox[1]),
-                                    (bbox[0] + bbox[2], bbox[1] + bbox[3]),
-                                    (255, 0, 0), 2)
+                              (bbox[0] + bbox[2], bbox[1] + bbox[3]),
+                              (255, 0, 0), 2)
 
         # Store the frame with a lock
         with lock:
@@ -135,6 +143,24 @@ def generate_frames(camera_id):
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 
+@app.route('/bandwidth_usage/<int:camera_id>', methods=['GET'])
+def bandwidth_usage_stream(camera_id):
+    def generate_bandwidth_data():
+        while True:
+            with lock:
+                data = bandwidth_usage.get(camera_id, None)
+                
+            if data is not None:
+                yield f"data: {data}\n\n"
+            else:
+                yield f": \n\n"
+            
+            time.sleep(1)  # Update every second
+
+    return Response(generate_bandwidth_data(), content_type='text/event-stream')
+
+    
+    
 @app.route('/video_feed/<camera_id>')
 def video_feed(camera_id):
     if int(camera_id) not in frames:
@@ -262,7 +288,7 @@ def start_tray():
 
 if __name__ == '__main__':
     # Start the Flask app in a separate thread
-    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000))
+    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, threaded=True))
     flask_thread.daemon = True
     flask_thread.start()
 
